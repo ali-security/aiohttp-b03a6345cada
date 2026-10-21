@@ -148,7 +148,7 @@ class CookieJar(AbstractCookieJar):
         *,
         unsafe: bool = False,
         quote_cookie: bool = True,
-        treat_as_secure_origin: StrOrURL | list[StrOrURL] | None = None,
+        treat_as_secure_origin: StrOrURL | Iterable[StrOrURL] | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__(loop=loop)
@@ -161,17 +161,20 @@ class CookieJar(AbstractCookieJar):
         self._unsafe = unsafe
         self._quote_cookie = quote_cookie
         if treat_as_secure_origin is None:
-            treat_as_secure_origin = []
+            self._treat_as_secure_origin: frozenset[URL] = frozenset()
         elif isinstance(treat_as_secure_origin, URL):
-            treat_as_secure_origin = [treat_as_secure_origin.origin()]
+            self._treat_as_secure_origin = frozenset({treat_as_secure_origin.origin()})
         elif isinstance(treat_as_secure_origin, str):
-            treat_as_secure_origin = [URL(treat_as_secure_origin).origin()]
+            self._treat_as_secure_origin = frozenset(
+                {URL(treat_as_secure_origin).origin()}
+            )
         else:
-            treat_as_secure_origin = [
-                URL(url).origin() if isinstance(url, str) else url.origin()
-                for url in treat_as_secure_origin
-            ]
-        self._treat_as_secure_origin = treat_as_secure_origin
+            self._treat_as_secure_origin = frozenset(
+                {
+                    URL(url).origin() if isinstance(url, str) else url.origin()
+                    for url in treat_as_secure_origin
+                }
+            )
         self._expire_heap: list[tuple[float, _CookieKey]] = []
         self._expirations: dict[_CookieKey, float] = {}
         self._access_generations: dict[_CookieKey, int] = {}
@@ -186,6 +189,11 @@ class CookieJar(AbstractCookieJar):
     @property
     def quote_cookie(self) -> bool:
         return self._quote_cookie
+
+    @property
+    def treat_as_secure_origin(self) -> frozenset[URL]:
+        """Return origins considered secure even over cleartext connections."""
+        return self._treat_as_secure_origin
 
     @property
     def cookies(self) -> MappingProxyType[tuple[str, str], SimpleCookie]:
@@ -702,6 +710,9 @@ class CookieJar(AbstractCookieJar):
         if key in self._cookies:
             morsels = self._morsel_cache[key]
             for name, cookie in self._cookies[key].items():
+                if is_not_secure and cookie["secure"]:
+                    continue
+
                 if (entry := morsels.get(name)) is None:
                     entry = morsels[name] = self._morsel_entry(key, name, cookie)
                 selected[name] = entry
