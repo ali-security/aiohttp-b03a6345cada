@@ -927,7 +927,76 @@ async def test_cookie_jar_host_only_cookies_property() -> None:
 
     host_only = jar.host_only_cookies
     assert isinstance(host_only, frozenset)
-    assert ("example.com", "hostonly") in host_only
+    assert ("example.com", "", "hostonly") in host_only
+
+
+async def test_host_only_marker_survives_same_name_expiry_on_other_path() -> None:
+    """Expiring a same-name cookie on another path must not clear host-only state."""
+    jar = CookieJar()
+    origin = URL("http://auth.example.com/")
+    subdomain = URL("http://evil.auth.example.com/")
+
+    jar.update_cookies_from_headers(["sid=secret; Path=/"], origin)
+    assert "sid" not in jar.filter_cookies(subdomain)
+
+    # Attacker-controlled descendant expires a same-name cookie on its own path.
+    jar.update_cookies_from_headers(
+        ["sid=gone; Domain=auth.example.com; Path=/attacker; Max-Age=0"],
+        subdomain,
+    )
+
+    assert ("auth.example.com", "", "sid") in jar.host_only_cookies
+    assert "sid" not in jar.filter_cookies(subdomain)
+    assert jar.filter_cookies(origin)["sid"].value == "secret"
+
+
+async def test_host_only_marker_survives_same_name_eviction_on_other_path() -> None:
+    """Evicting a same-name cookie on another path must not clear host-only state."""
+    jar = CookieJar()
+    origin = URL("https://auth.example.com/")
+    subdomain = URL("https://evil.auth.example.com/")
+
+    jar.update_cookies_from_headers(["sid=secret; Path=/; Secure"], origin)
+    assert "sid" not in jar.filter_cookies(subdomain)
+
+    # Attacker-controlled descendant plants a same-name cookie on its own path,
+    # then floods the domain over several responses so the jar evicts it.
+    jar.update_cookies_from_headers(
+        ["sid=planted; Domain=auth.example.com; Path=/attacker"], subdomain
+    )
+    for start in range(
+        0, cookiejar_module._MAX_COOKIES_PER_DOMAIN, _MAX_COOKIES_PER_RESPONSE
+    ):
+        jar.update_cookies_from_headers(
+            [
+                f"flood{i}=x; Domain=auth.example.com; Path=/flood"
+                for i in range(start, start + _MAX_COOKIES_PER_RESPONSE)
+            ],
+            subdomain,
+        )
+
+    assert ("auth.example.com", "/attacker") not in jar.cookies
+    assert ("auth.example.com", "", "sid") in jar.host_only_cookies
+    assert "sid" not in jar.filter_cookies(subdomain)
+    assert jar.filter_cookies(origin)["sid"].value == "secret"
+
+
+async def test_explicit_domain_replacement_clears_host_only_marker() -> None:
+    """A replacing cookie with an explicit Domain is a domain cookie."""
+    jar = CookieJar()
+    origin = URL("http://example.com/")
+    subdomain = URL("http://sub.example.com/")
+
+    jar.update_cookies_from_headers(["sid=hostonly; Path=/"], origin)
+    assert ("example.com", "", "sid") in jar.host_only_cookies
+    assert "sid" not in jar.filter_cookies(subdomain)
+
+    jar.update_cookies_from_headers(
+        ["sid=domainwide; Domain=example.com; Path=/"], origin
+    )
+
+    assert jar.host_only_cookies == frozenset()
+    assert jar.filter_cookies(subdomain)["sid"].value == "domainwide"
 
 
 async def test_cookie_jar_cookies_property_immutable() -> None:
@@ -1681,7 +1750,7 @@ async def test_cookie_jar_full_secure_domain_drops_new_non_secure_cookie(
 
     assert len(jar) == cookiejar_module._MAX_COOKIES_PER_DOMAIN
     assert "new" not in {cookie.key for cookie in jar}
-    assert ("example.com", "new") not in jar.host_only_cookies
+    assert ("example.com", "", "new") not in jar.host_only_cookies
 
 
 async def test_cookie_jar_full_secure_domain_evicts_for_new_secure_cookie() -> None:
@@ -2044,7 +2113,7 @@ def _assert_consistent(jar: CookieJar) -> None:
         generation <= jar._next_access_generation
         for generation in jar._access_generations.values()
     )
-    assert jar._host_only_cookies <= {(domain, name) for domain, _, name in stored}
+    assert jar._host_only_cookies <= stored
     assert set(jar._expirations) <= stored
     for jar_key, morsels in jar._morsel_cache.items():
         for name, (morsel, _, cookie_key) in morsels.items():
@@ -2806,7 +2875,7 @@ async def test_save_load_json_preserves_host_only_scope(tmp_path: Path) -> None:
     jar_load = CookieJar()
     jar_load.load(file_path=file_path)
 
-    assert jar_load.host_only_cookies == frozenset({("auth.example.com", "sid")})
+    assert jar_load.host_only_cookies == frozenset({("auth.example.com", "", "sid")})
     assert "sid" not in jar_load.filter_cookies(subdomain)
     assert "sid" in jar_load.filter_cookies(issuer)
 
@@ -2829,6 +2898,28 @@ async def test_save_load_json_domain_cookie_still_matches_subdomain(
 
     assert jar_load.host_only_cookies == frozenset()
     assert "sid" in jar_load.filter_cookies(subdomain)
+
+
+async def test_save_load_json_host_only_per_path(tmp_path: Path) -> None:
+    """Verify save/load keeps host-only state per (domain, path, name)."""
+    file_path = tmp_path / "per_path.json"
+    origin = URL("https://example.com/")
+    subdomain = URL("https://sub.example.com/")
+
+    jar_save = CookieJar()
+    jar_save.update_cookies_from_headers(
+        ["sid=hostonly; Path=/", "sid=domainwide; Domain=example.com; Path=/api"],
+        origin,
+    )
+    jar_save.save(file_path=file_path)
+
+    jar_load = CookieJar()
+    jar_load.load(file_path=file_path)
+
+    assert jar_load.host_only_cookies == frozenset({("example.com", "", "sid")})
+    assert "sid" not in jar_load.filter_cookies(subdomain)
+    filtered = jar_load.filter_cookies(URL("https://sub.example.com/api/x"))
+    assert filtered["sid"].value == "domainwide"
 
 
 async def test_save_load_json_preserves_max_age_deadline(tmp_path: Path) -> None:
