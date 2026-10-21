@@ -129,12 +129,12 @@ def out_low_limit(
 def parser_low_limit(
     out_low_limit: WebSocketDataQueue,
 ) -> PatchableWebSocketReader:
-    return PatchableWebSocketReader(out_low_limit, 4 * 1024 * 1024)
+    return PatchableWebSocketReader(out_low_limit, 4 * 1024 * 1024, compress=True)
 
 
 @pytest.fixture()
 def parser(out: WebSocketDataQueue) -> PatchableWebSocketReader:
-    return PatchableWebSocketReader(out, 4 * 1024 * 1024)
+    return PatchableWebSocketReader(out, 4 * 1024 * 1024, compress=True)
 
 
 def test_feed_data_remembers_exception(parser: WebSocketReader) -> None:
@@ -616,6 +616,31 @@ async def test_parse_no_compress_frame_single(
         parser_no_compress.parse_frame(struct.pack("!BB", 0b11000001, 0b00000001))
         parser_no_compress.parse_frame(b"1")
 
+    assert ctx.value.code == WSCloseCode.PROTOCOL_ERROR
+
+
+def test_default_reader_rejects_compressed_frame(out: WebSocketDataQueue) -> None:
+    """A reader built without an explicit ``compress`` must reject RSV1 frames.
+
+    ``WebSocketReader`` used to default to ``compress=True``, so a caller that
+    never negotiated permessage-deflate silently inflated the peer's frames
+    instead of failing the connection (RFC 6455 section 5.2).
+    """
+    payload = b"this frame should never be decompressed"
+    data = build_frame(payload, WSMsgType.TEXT, ZLibBackend=ZLibBackend)
+
+    # Control: the frame really is valid permessage-deflate, so the rejection
+    # below is a refusal to decompress rather than a malformed-frame error.
+    negotiated = WebSocketReader(out, 4 * 1024 * 1024, compress=True)
+    negotiated._feed_data(data)
+    assert out._buffer[0] == (
+        (WSMsgType.TEXT, payload.decode(), ""),
+        len(payload),
+    )
+
+    defaulted = WebSocketReader(out, 4 * 1024 * 1024)
+    with pytest.raises(WebSocketError) as ctx:
+        defaulted._feed_data(data)
     assert ctx.value.code == WSCloseCode.PROTOCOL_ERROR
 
 

@@ -138,7 +138,7 @@ class WebSocketReader:
         self,
         queue: WebSocketDataQueue,
         max_msg_size: int,
-        compress: bool = True,
+        compress: bool = False,
         decode_text: bool = True,
     ) -> None:
         self.queue = queue
