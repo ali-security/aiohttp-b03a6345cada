@@ -1,6 +1,7 @@
 import abc
 import asyncio
 import base64
+import fnmatch
 import functools
 import hashlib
 import html
@@ -840,15 +841,18 @@ class MaskDomain(Domain):
 
     def __init__(self, domain: str) -> None:
         super().__init__(domain)
-        mask = self._domain.replace(".", r"\.").replace("*", ".*")
-        self._mask = re.compile(mask)
+        self._pattern = self._domain.replace(".", r"\.").replace("*", ".*")
+        # fnmatch.translate() emulates atomic groups between wildcards, so a
+        # rule with several wildcards matches in linear time instead of
+        # backtracking polynomially over a long Host header.
+        self._mask = re.compile(fnmatch.translate(self._domain))
 
     @property
     def canonical(self) -> str:
-        return self._mask.pattern
+        return self._pattern
 
     def match_domain(self, host: str) -> bool:
-        return self._mask.fullmatch(host) is not None
+        return self._mask.match(host) is not None
 
 
 class MatchedSubAppResource(PrefixedSubAppResource):

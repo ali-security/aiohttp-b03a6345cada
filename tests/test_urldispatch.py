@@ -1,6 +1,7 @@
 import pathlib
 import platform
 import re
+import time
 from collections.abc import Container, Iterable, Mapping, MutableMapping, Sized
 from typing import NoReturn
 from urllib.parse import quote, unquote
@@ -1119,6 +1120,19 @@ def test_domain_valid():
         ("*.example.com", "jpg.example.com", True),
         ("*.example.com", "a.example.com", True),
         ("*.example.com", "example.com", False),
+        ("*.example.com:81", "a.example.com:81", True),
+        ("*.example.com:81", "a.example.com", False),
+        ("*.example.com:81", "a.example.com:8181", False),
+        ("*.example.com", "a.b.example.com", True),
+        ("*.example.com", ".example.com", True),
+        ("*", "a:b", True),
+        # Several wildcards, including adjacent and infix ones.
+        ("*.*.example.com", "a.b.example.com", True),
+        ("*.*.example.com", "a.example.com", False),
+        ("**.example.com", "a.example.com", True),
+        ("a*b.example.com", "axxb.example.com", True),
+        ("x*x.example.com", "x.example.com", False),
+        ("*.example.com:81", "a.example.com:81:9", False),
     ],
 )
 def test_match_domain(a, b, result):
@@ -1127,6 +1141,24 @@ def test_match_domain(a, b, result):
     else:
         rule = Domain(a)
     assert rule.match_domain(b) is result
+
+
+def test_match_domain_wildcards_long_host_is_not_polynomial() -> None:
+    """Several wildcards against the longest Host header must not backtrack.
+
+    Translating each ``*`` to a greedy ``.*`` made matching a dotted host
+    polynomial in its length per wildcard, so a single request could pin the
+    CPU for a very long time.
+    """
+    rule = MaskDomain("*.*.*.example.com")
+    # llhttp caps a Host header at max_field_size - len("Host") bytes, and a
+    # dotted host is the worst case for a wildcard rule.
+    host = ("a." * 4093)[:8186]
+
+    start = time.perf_counter()
+    for _ in range(10):
+        assert rule.match_domain(host) is False
+    assert time.perf_counter() - start < 1
 
 
 def test_add_subapp_errors(app):

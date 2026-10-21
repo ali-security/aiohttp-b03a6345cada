@@ -37,11 +37,13 @@ cdef set MESSAGE_TYPES_WITH_CONTENT
 cdef tuple EMPTY_FRAME
 cdef tuple EMPTY_FRAME_ERROR
 
+cdef unsigned int MSG_SIZE_OVERHEAD
+
 cdef class WebSocketDataQueue:
 
-    cdef unsigned int _size
+    cdef readonly unsigned int _size
     cdef public object _protocol
-    cdef unsigned int _limit
+    cdef readonly unsigned int _limit
     cdef object _loop
     cdef bint _eof
     cdef object _waiter
@@ -49,6 +51,7 @@ cdef class WebSocketDataQueue:
     cdef public object _buffer
     cdef object _get_buffer
     cdef object _put_buffer
+    cdef readonly object _stalled_reader
 
     cdef void _release_waiter(self)
 
@@ -71,6 +74,8 @@ cdef class WebSocketReader:
     cdef bint _frame_fin
     cdef int _frame_opcode
     cdef list _payload_fragments
+    cdef bytearray _payload_buffer
+    cdef Py_ssize_t _max_fragments
     cdef Py_ssize_t _frame_payload_len
 
     cdef bytes _tail
@@ -107,6 +112,7 @@ cdef class WebSocketReader:
         has_mask=bint,
         fin=bint,
         had_fragments=Py_ssize_t,
+        partial_len=Py_ssize_t,
         payload_bytearray=bytearray,
     )
     cpdef void _feed_data(self, bytes data) except *

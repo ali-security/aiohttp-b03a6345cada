@@ -73,6 +73,24 @@ def test_preserve_morsel_with_coded_value_no_coded_value() -> None:
     assert result.coded_value == "simple_value"
 
 
+@pytest.mark.parametrize("name", sorted(Morsel._reserved))  # type: ignore[attr-defined]
+@pytest.mark.parametrize("coded_value", ("value", '"value"'))
+def test_preserve_morsel_with_reserved_cookie_name(name: str, coded_value: str) -> None:
+    """A cookie named like an attribute, such as ``path``, is preserved."""
+    cookie: Morsel[str] = Morsel()
+    cookie.__setstate__(  # type: ignore[attr-defined]
+        {"key": name, "value": "value", "coded_value": coded_value}
+    )
+
+    result = preserve_morsel_with_coded_value(cookie)
+
+    assert result is not cookie
+    assert result.key == name
+    assert result.value == "value"
+    assert result.coded_value == coded_value
+    assert result.OutputString() == f"{name}={coded_value}"
+
+
 def test_parse_set_cookie_headers_simple() -> None:
     """Test parse_set_cookie_headers with simple cookies."""
     headers = ["name=value", "session=abc123"]
@@ -923,12 +941,105 @@ def test_parse_set_cookie_headers_expires_attribute() -> None:
 
 
 def test_parse_set_cookie_headers_edge_cases() -> None:
-    """Test various edge cases."""
-    # Very long cookie values
-    long_value = "x" * 4096
-    result = parse_set_cookie_headers([f"name={long_value}"])
+    """Cookie name and value are limited to 4096 encoded octets."""
+    boundary_value = "x" * 4092
+    result = parse_set_cookie_headers([f"name={boundary_value}"])
     assert len(result) == 1
-    assert result[0][1].value == long_value
+    assert result[0][1].value == boundary_value
+
+    assert parse_set_cookie_headers([f"name={boundary_value}x"]) == []
+
+
+def test_parse_set_cookie_headers_counts_coded_quoted_octets() -> None:
+    coded_value = '"' + r"\a" * 2046 + 'x"'
+    assert len(b"n") + len(coded_value.encode()) == 4096
+
+    result = parse_set_cookie_headers([f"n={coded_value}"])
+    assert len(result) == 1
+    assert len(result[0][1].value) < 4096
+
+    over_limit = coded_value[:-1] + 'x"'
+    assert len(b"n") + len(over_limit.encode()) == 4097
+    assert parse_set_cookie_headers([f"n={over_limit}"]) == []
+
+
+def test_parse_set_cookie_headers_oversized_pair_ignores_its_attributes() -> None:
+    """An oversized pair is dropped with its attributes; later pairs still parse."""
+    big = "x" * (helpers._MAX_COOKIE_PAIR_LENGTH + 1)
+    result = parse_set_cookie_headers([f"big={big}; Path=/big; small=1; Path=/s"])
+
+    assert [name for name, _ in result] == ["small"]
+    assert result[0][1]["path"] == "/s"
+
+
+def test_parse_set_cookie_headers_limits_accepted_fields() -> None:
+    """Malformed fields do not consume the 50-cookie response budget."""
+    limit = helpers._MAX_COOKIES_PER_RESPONSE
+    headers = ["not-a-cookie"] * 10 + [f"cookie{i}=value" for i in range(limit + 1)]
+
+    result = parse_set_cookie_headers(headers)
+
+    assert len(result) == limit
+    assert result[-1][0] == f"cookie{limit - 1}"
+
+
+def test_parse_set_cookie_headers_duplicate_consumes_response_budget() -> None:
+    limit = helpers._MAX_COOKIES_PER_RESPONSE
+    headers = [f"cookie{i}=value" for i in range(limit - 1)]
+    headers.extend(("cookie0=replaced", "not_stored=over-limit"))
+
+    result = parse_set_cookie_headers(headers)
+
+    assert len(result) == helpers._MAX_COOKIES_PER_RESPONSE
+    assert result[-1][0] == "cookie0"
+    assert all(name != "not_stored" for name, _ in result)
+
+
+def test_parse_set_cookie_headers_limits_cookies_within_one_field() -> None:
+    """Pairs packed into one field share the per-response cookie budget."""
+    limit = helpers._MAX_COOKIES_PER_RESPONSE
+    field = "; ".join(f"c{i}=v" for i in range(4000))
+
+    result = parse_set_cookie_headers([field, "later=value"])
+
+    assert len(result) == limit
+    assert [name for name, _ in result] == [f"c{i}" for i in range(limit)]
+
+
+def test_parse_set_cookie_headers_limit_keeps_last_cookie_attributes() -> None:
+    limit = helpers._MAX_COOKIES_PER_RESPONSE
+    headers = [f"cookie{i}=value" for i in range(limit - 1)]
+    headers.append("last=value; Path=/last; Secure; over=limit")
+
+    result = parse_set_cookie_headers(headers)
+
+    assert len(result) == limit
+    assert result[-1][0] == "last"
+    assert result[-1][1]["path"] == "/last"
+    assert result[-1][1]["secure"] is True
+
+
+def test_parse_set_cookie_headers_attribute_value_limits() -> None:
+    accepted_path = "/" + "x" * (helpers._MAX_COOKIE_ATTRIBUTE_VALUE_LENGTH - 1)
+    ignored_path = accepted_path + "x"
+
+    accepted = parse_set_cookie_headers([f"cookie=value; Path={accepted_path}"])
+    ignored = parse_set_cookie_headers([f"cookie=value; Path={ignored_path}"])
+    ignored_dollar = parse_set_cookie_headers([f"cookie=value; $Path={ignored_path}"])
+
+    assert accepted[0][1]["path"] == accepted_path
+    assert ignored[0][1]["path"] == ""
+    assert ignored_dollar[0][1]["path"] == ""
+
+
+@pytest.mark.parametrize("flag", ("Secure", "HttpOnly"))
+def test_parse_set_cookie_headers_flag_values_are_ignored(flag: str) -> None:
+    """An oversized value doesn't strip the flag."""
+    value = "x" * (helpers._MAX_COOKIE_ATTRIBUTE_VALUE_LENGTH + 1)
+
+    result = parse_set_cookie_headers([f"cookie=value; {flag}={value}"])
+
+    assert result[0][1][flag.lower()] is True
 
 
 def test_parse_set_cookie_headers_various_date_formats_issue_4327() -> None:
