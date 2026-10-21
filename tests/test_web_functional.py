@@ -2594,3 +2594,60 @@ async def test_keepalive_expires_on_time(aiohttp_client: AiohttpClient) -> None:
 
         # Ensure the keep alive handle expires
         assert request_handler._keepalive_handle is None
+
+
+async def test_declined_websocket_upgrade_reads_body(
+    aiohttp_server: AiohttpServer,
+) -> None:
+    """A rejected upgrade must consume its own body.
+
+    The switch to the upgraded protocol has to be deferred until the whole
+    request has been received, otherwise the body is handed to the connection
+    as raw upgraded-protocol data -- a complete request hidden in it is then
+    smuggled past the framing of the request that carried it.
+    """
+    routed = []
+    body_read = b""
+    smuggled = b"GET /smuggled HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+    async def ws_handler(request: web.Request) -> web.Response:
+        nonlocal body_read
+        routed.append(request.path)
+        # Decline the upgrade; read the body as a normal handler may.
+        body_read = await request.read()
+        return web.Response(text="declined")
+
+    async def smuggled_handler(request: web.Request) -> web.Response:
+        routed.append(request.path)
+        return web.Response(text="smuggled")
+
+    app = web.Application()
+    app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/smuggled", smuggled_handler)
+    server = await aiohttp_server(app)
+
+    # A complete request smuggled inside the declined upgrade's body.
+    raw_request = (
+        b"GET /ws HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Content-Length: %d\r\n\r\n" % len(smuggled)
+    ) + smuggled
+
+    # Use a raw connection so the upgrade request can carry a body.
+    reader, writer = await asyncio.open_connection(server.host, server.port)
+    try:
+        writer.write(raw_request)
+        await writer.drain()
+        response = await asyncio.wait_for(reader.readuntil(b"declined"), 5)
+    finally:
+        writer.close()
+        with suppress(ConnectionResetError, BrokenPipeError):
+            await writer.wait_closed()
+
+    # The body reached the handler instead of the upgraded protocol stream.
+    assert body_read == smuggled
+    # Exactly one response, and the smuggled request was never routed.
+    assert response.count(b"HTTP/1.") == 1, response
+    assert routed == ["/ws"]
